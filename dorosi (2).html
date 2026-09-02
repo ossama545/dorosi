@@ -366,6 +366,20 @@ function groupLabel(g){
 
 /* ============ Navigation ============ */
 let currentGroupId = null;
+let activeSessionGroupIds = null;
+
+function getActiveSessionGroupIds(){
+  if(Array.isArray(activeSessionGroupIds) && activeSessionGroupIds.length) return [...activeSessionGroupIds];
+  if(currentGroupId) return [currentGroupId];
+  return [];
+}
+function getRelativeMonthInfo(offset){
+  const d = new Date();
+  d.setMonth(d.getMonth() + offset);
+  const year = d.getFullYear();
+  const monthNumber = d.getMonth() + 1;
+  return { year, monthNumber, ym: `${year}-${String(monthNumber).padStart(2,'0')}` };
+}
 
 function showView(name){
   document.getElementById('groupsView').style.display = name==='groups' ? '' : 'none';
@@ -379,6 +393,7 @@ document.getElementById('tabs').addEventListener('click', (e)=>{
   document.querySelectorAll('#tabs button').forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');
   currentGroupId = null;
+  activeSessionGroupIds = null;
   if(btn.dataset.tab==='groups'){ showView('groups'); renderGroupsList(); }
   if(btn.dataset.tab==='months'){ monthsGroupId = undefined; showView('months'); renderMonths(); }
   if(btn.dataset.tab==='income'){ showView('income'); renderIncome(); }
@@ -387,6 +402,10 @@ document.getElementById('tabs').addEventListener('click', (e)=>{
 /* ============ Groups list ============ */
 function renderGroupsList(){
   const grid = document.getElementById('groupGrid');
+  const multiSessionBar = `
+    <div style="grid-column:1/-1; display:flex; justify-content:flex-start;">
+      <button class="btn gold" id="startMultiSessionBtn" ${GROUPS.length<2?'disabled':''}>▶ بدء حصة متعددة</button>
+    </div>`;
   let html = GROUPS.map(g=>{
     const members = DATA.filter(s=>s.groupId===g.id);
     const ym = ymKey();
@@ -411,11 +430,56 @@ function renderGroupsList(){
     </div>`;
   }
   html += `<div class="add-group-card" id="addGroupCard">+ مجموعة جديدة</div>`;
-  grid.innerHTML = html;
+  grid.innerHTML = multiSessionBar + html;
   grid.querySelectorAll('.group-card').forEach(c=>{
     c.onclick = ()=> openGroup(c.dataset.id==='__none__' ? null : c.dataset.id);
   });
+  document.getElementById('startMultiSessionBtn').onclick = ()=> openMultiSessionModal();
   document.getElementById('addGroupCard').onclick = ()=> openGroupModal(null);
+}
+function openMultiSessionModal(){
+  if(GROUPS.length < 2){
+    showToast('لازم يكون عندك مجموعتين على الأقل');
+    return;
+  }
+  const ov = document.createElement('div');
+  ov.className='overlay';
+  ov.innerHTML = `
+    <div class="modal">
+      <h3>بدء حصة متعددة</h3>
+      <p style="font-size:13px; color:var(--ink-soft); margin-top:0;">اختر مجموعتين أو أكثر لتسجيل الحضور منهم في نفس الحصة.</p>
+      <div class="field">
+        <label>المجموعات</label>
+        <div style="display:flex; flex-direction:column; gap:8px; max-height:240px; overflow:auto;">
+          ${GROUPS.map(g=>{
+            const members = DATA.filter(s=>s.groupId===g.id).length;
+            return `<label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+              <input type="checkbox" class="ms-group" value="${g.id}">
+              <span>${escapeHtml(g.name)} <span style="color:var(--ink-soft); font-size:12px;">(${members} طالب)</span></span>
+            </label>`;
+          }).join('')}
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn outline" id="msCancel">إلغاء</button>
+        <button class="btn gold" id="msStart">بدء الحصة</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  ov.addEventListener('click', e=>{ if(e.target===ov) ov.remove(); });
+  ov.querySelector('#msCancel').onclick = ()=> ov.remove();
+  ov.querySelector('#msStart').onclick = ()=>{
+    const selected = Array.from(ov.querySelectorAll('.ms-group:checked')).map(x=>x.value);
+    if(selected.length < 2){
+      showToast('اختر مجموعتين أو أكثر');
+      return;
+    }
+    activeSessionGroupIds = selected;
+    currentGroupId = null;
+    ov.remove();
+    showView('group');
+    renderGroupView();
+  };
 }
 
 function openGroupModal(existing){
@@ -478,22 +542,36 @@ function openGroupModal(existing){
 let selectedIds = new Set();
 function getVisibleGroupMembers(){
   const q = (document.getElementById('groupSearchInput')?.value || '').trim().toLowerCase();
-  let members = DATA.filter(s=> currentGroupId ? s.groupId===currentGroupId : (!s.groupId || !getGroup(s.groupId)));
+  let members;
+  if(Array.isArray(activeSessionGroupIds) && activeSessionGroupIds.length){
+    members = DATA.filter(s=>activeSessionGroupIds.includes(s.groupId));
+  }else{
+    members = DATA.filter(s=> currentGroupId ? s.groupId===currentGroupId : (!s.groupId || !getGroup(s.groupId)));
+  }
   members = members.filter(s => !q || s.name.toLowerCase().includes(q) || (s.phone||'').includes(q) || (s.barcode||'').toLowerCase().includes(q) || (s.parentPhone||'').includes(q));
   members.sort((a,b)=> a.name.localeCompare(b.name,'ar'));
   return members;
 }
 function openGroup(groupId){
+  activeSessionGroupIds = null;
   currentGroupId = groupId;
   showView('group');
   renderGroupView();
 }
 
 function renderGroupView(){
+  const isMultiSession = Array.isArray(activeSessionGroupIds) && activeSessionGroupIds.length>0;
+  const sessionGroups = isMultiSession ? GROUPS.filter(x=>activeSessionGroupIds.includes(x.id)) : [];
   const g = currentGroupId ? getGroup(currentGroupId) : null;
   const view = document.getElementById('groupView');
-  const title = g ? g.name : 'غير مصنّفين';
-  const sched = g ? groupLabel(g) : 'طلاب من غير مجموعة محددة';
+  const title = isMultiSession ? `حصة متعددة (${sessionGroups.length} مجموعات)` : (g ? g.name : 'غير مصنّفين');
+  const sched = isMultiSession
+    ? sessionGroups.map(x=>escapeHtml(x.name)).join(' — ')
+    : (g ? groupLabel(g) : 'طلاب من غير مجموعة محددة');
+  const canCloseSession = isMultiSession || !!g;
+  const scanHint = isMultiSession
+    ? 'هيتسجل حضور اليوم أوتوماتيك لأي طالب من المجموعات المختارة'
+    : 'هيتسجل حضور اليوم أوتوماتيك لأي طالب من المجموعة دي';
   view.innerHTML = `
     <button class="btn outline" id="backToGroups" style="margin-bottom:14px;">→ كل المجموعات</button>
     <div class="card group-header-card">
@@ -501,20 +579,20 @@ function renderGroupView(){
         <h2 style="margin:0 0 4px;">${escapeHtml(title)}</h2>
         <div style="color:var(--cyan); font-size:13px; font-family:'JetBrains Mono',monospace;">${escapeHtml(sched)}</div>
       </div>
-      ${g?`<button class="btn outline" id="editGroupBtn">✎ تعديل المجموعة</button>`:''}
+      ${g && !isMultiSession?`<button class="btn outline" id="editGroupBtn">✎ تعديل المجموعة</button>`:''}
     </div>
 
     <div class="card scan-box">
       <div class="icon">🪪</div>
-      <h3 style="margin:0 0 10px;">ابدأ الحصة — امسح كارت الطالب</h3>
+      <h3 style="margin:0 0 10px;">${isMultiSession?'ابدأ الحصة المتعددة':'ابدأ الحصة'} — امسح كارت الطالب</h3>
       <input type="text" id="scanInput" class="scan-input" placeholder="وجّه الماسح هنا..." autocomplete="off">
-      <p class="scan-hint">هيتسجل حضور اليوم أوتوماتيك لأي طالب من المجموعة دي</p>
-      ${g?`<button class="btn danger" id="closeSessionBtn" style="margin-top:16px;">🔒 إغلاق الحصة</button>
-      <p class="scan-hint" style="margin-top:6px;">أي طالب في المجموعة كارته مضربش هيتسجل "غايب" أوتوماتيك</p>`:''}
+      <p class="scan-hint">${scanHint}</p>
+      ${canCloseSession?`<button class="btn danger" id="closeSessionBtn" style="margin-top:16px;">🔒 إغلاق الحصة</button>
+      <p class="scan-hint" style="margin-top:6px;">أي طالب في نطاق الحصة كارته مضربش هيتسجل "غايب" أوتوماتيك في مجموعته الأساسية</p>`:''}
     </div>
     <div id="scanResult"></div>
 
-    <div class="section-title"><span>👥 طلاب المجموعة</span><div class="line"></div></div>
+    <div class="section-title"><span>👥 ${isMultiSession?'طلاب الحصة':'طلاب المجموعة'}</span><div class="line"></div></div>
     <div class="search-row">
       <input type="text" id="groupSearchInput" placeholder="ابحث بالاسم أو التليفون أو الكود...">
       <button class="btn gold" id="addStudentBtn">+ طالب جديد</button>
@@ -530,16 +608,20 @@ function renderGroupView(){
     <div class="student-list" id="groupStudentList" style="margin-top:10px;"></div>
   `;
   selectedIds.clear();
-  document.getElementById('backToGroups').onclick = ()=>{ showView('groups'); renderGroupsList(); };
+  document.getElementById('backToGroups').onclick = ()=>{ activeSessionGroupIds = null; showView('groups'); renderGroupsList(); };
   if(g) document.getElementById('editGroupBtn').onclick = ()=> openGroupModal(g);
   document.getElementById('addStudentBtn').onclick = ()=> openStudentModal(null, '', currentGroupId);
-  if(g){
+  if(canCloseSession){
     document.getElementById('closeSessionBtn').onclick = async ()=>{
-      const members = DATA.filter(s=>s.groupId===currentGroupId);
+      const sessionGroupIds = isMultiSession ? [...activeSessionGroupIds] : (currentGroupId ? [currentGroupId] : []);
+      const members = DATA.filter(s=>sessionGroupIds.includes(s.groupId));
       const today = todayKey();
-      const notPresent = members.filter(s=> (s.attendance||{})[today] !== 'present');
+      const notPresent = members.filter(s=>{
+        const status = (s.attendance||{})[today];
+        return status !== 'present' && status !== 'absent';
+      });
       if(notPresent.length===0){
-        showToast('كل الطلاب سجلوا حضورهم بالفعل ✓');
+        showToast('تم تسجيل حضور/غياب كل الطلاب بالفعل ✓');
         return;
       }
       const ok = confirm(`${notPresent.length} طالب لسه ملهمش حضور النهاردة. هيتسجل لهم "غياب" تلقائي. متأكد إنك عايز تقفل الحصة؟`);
@@ -578,11 +660,13 @@ function renderGroupView(){
 }
 
 function renderGroupStats(){
-  const members = DATA.filter(s=> currentGroupId ? s.groupId===currentGroupId : (!s.groupId || !getGroup(s.groupId)));
+  const members = Array.isArray(activeSessionGroupIds) && activeSessionGroupIds.length
+    ? DATA.filter(s=>activeSessionGroupIds.includes(s.groupId))
+    : DATA.filter(s=> currentGroupId ? s.groupId===currentGroupId : (!s.groupId || !getGroup(s.groupId)));
   const ym = ymKey();
   const paid = members.filter(s=>s.payments && s.payments[ym] && s.payments[ym].paid).length;
   document.getElementById('groupStats').innerHTML = `
-    <div class="stat"><div class="num">${members.length}</div><div class="lbl">طلاب المجموعة</div></div>
+    <div class="stat"><div class="num">${members.length}</div><div class="lbl">${(Array.isArray(activeSessionGroupIds) && activeSessionGroupIds.length)?'طلاب الحصة':'طلاب المجموعة'}</div></div>
     <div class="stat"><div class="num" style="color:var(--green)">${paid}</div><div class="lbl">دفعوا هذا الشهر</div></div>
     <div class="stat"><div class="num" style="color:var(--red)">${members.length-paid}</div><div class="lbl">لم يدفعوا بعد</div></div>
   `;
@@ -590,6 +674,8 @@ function renderGroupStats(){
 
 function handleGroupScan(code){
   const box = document.getElementById('scanResult');
+  const inMultiSession = Array.isArray(activeSessionGroupIds) && activeSessionGroupIds.length>0;
+  const sessionGroupIds = getActiveSessionGroupIds();
   const s = DATA.find(x=>x.barcode===code);
   if(!s){
     box.innerHTML = `
@@ -600,7 +686,18 @@ function handleGroupScan(code){
     document.getElementById('createFromScan').onclick = ()=> openStudentModal(null, code, currentGroupId);
     return;
   }
-  if(s.groupId !== currentGroupId){
+  if(inMultiSession && !sessionGroupIds.includes(s.groupId)){
+    box.innerHTML = `
+      <div class="card scan-result-card warn">
+        <p>⚠ الطالب <b>${escapeHtml(s.name)}</b> مش ضمن المجموعات المختارة للحصة دي.</p>
+        <div class="sr-actions">
+          <button class="btn outline" id="viewAnywayBtn">عرض بياناته فقط</button>
+        </div>
+      </div>`;
+    document.getElementById('viewAnywayBtn').onclick = ()=> openProfile(s.id);
+    return;
+  }
+  if(!inMultiSession && s.groupId !== currentGroupId){
     const otherGroup = getGroup(s.groupId);
     box.innerHTML = `
       <div class="card scan-result-card warn">
@@ -640,9 +737,12 @@ function getLastSessionInfo(s){
 }
 function renderScanResultCard(s, justRegistered){
   const box = document.getElementById('scanResult');
-  const ym = ymKey();
-  const pay = s.payments && s.payments[ym];
-  const paid = pay && pay.paid;
+  const prevMonth = getRelativeMonthInfo(-1);
+  const currentMonth = getRelativeMonthInfo(0);
+  const prevPay = s.payments && s.payments[prevMonth.ym];
+  const currentPay = s.payments && s.payments[currentMonth.ym];
+  const prevPaid = prevPay && prevPay.paid;
+  const currentPaid = currentPay && currentPay.paid;
   const last = getLastSessionInfo(s);
   let lastHtml;
   if(!last){
@@ -659,8 +759,11 @@ function renderScanResultCard(s, justRegistered){
           <p class="sr-name">✔ ${escapeHtml(s.name)}</p>
           <div style="color:var(--ink-soft); font-size:12px;">${justRegistered?'تم تسجيل حضور اليوم':'الطالب مسجّل حضور اليوم بالفعل'}</div>
           <div style="margin-top:8px;">${lastHtml}</div>
+          <div style="margin-top:8px;">
+            <span class="pill ${prevPaid?'paid':'unpaid'}">${prevPaid?`دفع شهر ${prevMonth.monthNumber} ✓`:`لم يتم دفع الشهر ${prevMonth.monthNumber}`}</span>
+          </div>
         </div>
-        <span class="pill ${paid?'paid':'unpaid'}">${paid?('دُفع هذا الشهر ✓'):'لم يدفع هذا الشهر'}</span>
+        <span class="pill ${currentPaid?'paid':'unpaid'}">${currentPaid?`دفع شهر ${currentMonth.monthNumber} ✓`:`لم يدفع شهر ${currentMonth.monthNumber}`}</span>
       </div>
       <div class="info-grid" style="margin-top:12px;">
         <div class="info-item"><div class="k">تليفون الطالب</div><div class="v">${escapeHtml(s.phone||'—')}</div></div>
@@ -668,20 +771,24 @@ function renderScanResultCard(s, justRegistered){
         <div class="info-item"><div class="k">الاشتراك الشهري</div><div class="v">${s.fee||0} ج.م</div></div>
       </div>
       <div class="sr-actions">
-        <button class="btn ${paid?'outline':'gold'}" id="togglePayBtn">${paid?'إلغاء الدفع':'💳 دفع هذا الشهر'}</button>
+        ${prevPaid?'':`<button class="btn ${prevPaid?'outline':'gold'} scanPayBtn" data-ym="${prevMonth.ym}" data-m="${prevMonth.monthNumber}">${prevPaid?`إلغاء دفع شهر ${prevMonth.monthNumber}`:`💳 دفع شهر ${prevMonth.monthNumber}`}</button>`}
+        <button class="btn ${currentPaid?'outline':'gold'} scanPayBtn" data-ym="${currentMonth.ym}" data-m="${currentMonth.monthNumber}">${currentPaid?`إلغاء دفع شهر ${currentMonth.monthNumber}`:`💳 دفع شهر ${currentMonth.monthNumber}`}</button>
         <button class="btn outline" id="editFromScanBtn">✎ تعديل بيانات</button>
         <button class="btn outline" id="fullProfileBtn">📅 السجل الكامل</button>
       </div>
     </div>`;
-  document.getElementById('togglePayBtn').onclick = async ()=>{
-    s.payments = s.payments || {};
-    const cur = s.payments[ym];
-    if(cur && cur.paid) delete s.payments[ym];
-    else s.payments[ym] = { paid:true, amount: s.fee||0, date: new Date().toISOString().slice(0,10) };
-    await saveData();
-    renderScanResultCard(s, false);
-    renderGroupStudentList(); renderGroupStats();
-  };
+  box.querySelectorAll('.scanPayBtn').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const ym = btn.dataset.ym;
+      s.payments = s.payments || {};
+      const cur = s.payments[ym];
+      if(cur && cur.paid) delete s.payments[ym];
+      else s.payments[ym] = { paid:true, amount: s.fee||0, date: new Date().toISOString().slice(0,10) };
+      await saveData();
+      renderScanResultCard(s, false);
+      renderGroupStudentList(); renderGroupStats();
+    };
+  });
   document.getElementById('editFromScanBtn').onclick = ()=> openStudentModal(s.id, '', currentGroupId);
   document.getElementById('fullProfileBtn').onclick = ()=> openProfile(s.id);
 }
