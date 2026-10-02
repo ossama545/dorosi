@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Eng. Osama Waled — البرمجة والذكاء الاصطناعي</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0f141f">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2064%2064%22%3E%0A%20%20%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2214%22%20fill%3D%22%230f141f%22/%3E%0A%20%20%3Crect%20x%3D%222%22%20y%3D%222%22%20width%3D%2260%22%20height%3D%2260%22%20rx%3D%2212%22%20fill%3D%22none%22%20stroke%3D%22%23223%22%20stroke-width%3D%221%22/%3E%0A%20%20%3Ctext%20x%3D%2232%22%20y%3D%2243%22%20font-family%3D%22%27JetBrains%20Mono%27%2C%20%27Courier%20New%27%2C%20monospace%22%20font-size%3D%2230%22%20font-weight%3D%22800%22%20text-anchor%3D%22middle%22%20fill%3D%22%2345c1ff%22%3E%26lt%3B/%26gt%3B%3C/text%3E%0A%3C/svg%3E%0A">
+
+<!-- Prevent a flash of the wrong theme on load (pure UI preference, no data access) -->
+<script>
+  try{
+    var t = localStorage.getItem('dorosi-theme');
+    if(t === 'light') document.documentElement.setAttribute('data-theme','light');
+  }catch(e){}
+</script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&family=Tajawal:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="authScreen">
+  <div class="card">
+    <div class="auth-badge">&lt;/&gt;</div>
+    <h2>تسجيل الدخول</h2>
+    <p class="auth-sub">Eng. Osama Waled — دخول لحسابك الخاص</p>
+    <div class="field" style="text-align:right;"><label>البريد الإلكتروني</label><input type="email" id="authEmail"></div>
+    <div class="field" style="text-align:right;"><label>كلمة المرور</label><input type="password" id="authPass"></div>
+    <p id="authError"></p>
+    <div style="text-align:center; margin-bottom:10px;"><button class="btn outline small" id="forgotBtn" type="button">🔑 نسيت كلمة المرور؟</button></div>
+    <div class="modal-actions" style="justify-content:center;">
+      <button class="btn outline" id="signupBtn">إنشاء حساب جديد</button>
+      <button class="btn gold" id="loginBtn">دخول</button>
+    </div>
+    <p class="auth-foot">أول مرة تفتح البرنامج؟ اكتب إيميل وباسورد واضغط "إنشاء حساب جديد" — بعد كده استخدم نفس البيانات من أي جهاز.</p>
+  </div>
+</div>
+
+<div class="wrap" id="appWrap" style="display:none;">
+  <header class="top">
+    <div class="title">
+      <div class="dots"><span></span><span></span><span></span></div>
+      <div class="badge">&lt;/&gt;</div>
+      <div>
+        <h1><span class="cmt">//</span> البرمجة والذكاء الاصطناعي</h1>
+        <p class="sub">Eng. Osama Waled</p>
+      </div>
+    </div>
+    <div class="head-actions">
+      <span id="syncBadge" class="pill paid" style="display:none;"></span>
+      <button id="themeToggleBtn" title="تبديل المظهر">☀️</button>
+      <button class="btn outline" id="settingsBtn">⚙ إعدادات</button>
+    </div>
+  </header>
+  <div class="term-bar">$ <b>groups</b> --track-attendance --track-income</div>
+
+  <nav class="tabs" id="tabs">
+    <button data-tab="groups" class="active">🗂 المجموعات</button>
+    <button data-tab="months">📅 الشهور</button>
+    <button data-tab="income">💰 الدخل الشهري</button>
+    <button data-tab="arrears">⏰ المتأخرات</button>
+    <button data-tab="dropouts">🚫 المنقطعين</button>
+    <button data-tab="notify">📲 إخطار أولياء الأمور</button>
+    <button data-tab="reports">📊 التقارير والإحصائيات</button>
+  </nav>
+
+  <div id="groupsView">
+    <div class="dashboard-stats" id="dashboardStats"></div>
+    <div id="sessionLauncher" style="margin-bottom:16px;"></div>
+    <div class="section-title"><span>مجموعاتك</span><div class="line"></div></div>
+    <div class="group-grid" id="groupGrid"></div>
+  </div>
+
+  <div id="groupView" style="display:none;"></div>
+
+  <div id="monthsView" style="display:none;"></div>
+
+  <div id="incomeView" style="display:none;"></div>
+
+  <div id="arrearsView" style="display:none;"></div>
+
+  <div id="dropoutsView" style="display:none;"></div>
+
+  <div id="notifyView" style="display:none;"></div>
+
+  <div id="reportsView" style="display:none;"></div>
+
+  <div id="profileView" style="display:none;"></div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
