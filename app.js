@@ -67,6 +67,8 @@ function normalizeSessionRecord(rec){
 let STORAGE_MODE = 'v2';           // 'v2' | 'legacy'
 let LOAD_OK = false;               // مفيش حفظ قبل ما التحميل ينجح (يمنع مسح الداتا بالغلط)
 const SAVED = { students:new Map(), meta:{} };
+let ARCHIVE = [];                  // الطلاب المؤرشفين (محفوظين كاملين، بس مش ظاهرين في باقي البرنامج)
+function partitionArchive(){ ARCHIVE = DATA.filter(s=>s.archived); DATA = DATA.filter(s=>!s.archived); }
 const META_KEYS = ['groups','activeSession','sessions','settings'];
 const canon = o => JSON.stringify(o, (k,v)=> (v && typeof v==='object' && !Array.isArray(v)) ? Object.keys(v).sort().reduce((a,x)=>{ a[x]=v[x]; return a; },{}) : v);
 const userRef = ()=> db.collection('users').doc(currentUID);
@@ -105,6 +107,7 @@ async function loadData(){
       DATA = Array.isArray(d.students) ? d.students : [];
       await migrateToV2(ref, d);
     }
+    partitionArchive();
 
     const raw = d.activeSession;
     if(raw && Array.isArray(raw.groupIds) && raw.groupIds.length){
@@ -122,16 +125,17 @@ async function loadData(){
       ACTIVE_SESSION = null;
     }
 
-    SAVED.students = new Map(DATA.map(s=>[s.id, canon(s)]));
+    SAVED.students = new Map(DATA.concat(ARCHIVE).map(s=>[s.id, canon(s)]));
     SAVED.meta = {}; META_KEYS.forEach(k=> SAVED.meta[k] = canon(baseMeta[k]));
     LOAD_OK = true;
   }catch(e){
     console.error(e);
-    DATA = []; GROUPS = []; SESSIONS = []; LOAD_OK = false;
+    DATA = []; ARCHIVE = []; GROUPS = []; SESSIONS = []; LOAD_OK = false;
     showToast('تعذّر تحميل البيانات — اتأكد من النت واعمل تحديث للصفحة');
     return;
   }
   setSync();
+  updateArchiveTab();
   startRealtimeSync();
   maybeAutoBackup();
 }
@@ -191,14 +195,14 @@ let saveQueued = false;
 
 async function saveLegacy(){
   const clean = o => JSON.parse(JSON.stringify(o===undefined?null:o));
-  const p = userRef().set({ students:clean(DATA), groups:clean(GROUPS), activeSession:clean(ACTIVE_SESSION), sessions:clean(SESSIONS), settings:clean(SETTINGS) }, { merge:true });
+  const p = userRef().set({ students:clean(DATA.concat(ARCHIVE)), groups:clean(GROUPS), activeSession:clean(ACTIVE_SESSION), sessions:clean(SESSIONS), settings:clean(SETTINGS) }, { merge:true });
   if(navigator.onLine) await withTimeout(p, 4000);
 }
 
 async function saveV2(){
   const col = studentsCol(), ref = userRef();
   const sets = [], dels = [], seen = new Set();
-  DATA.forEach(s=>{
+  DATA.concat(ARCHIVE).forEach(s=>{
     if(!s.id) s.id = uid('s');
     seen.add(s.id);
     const js = canon(s);
@@ -249,6 +253,13 @@ async function saveV2(){
 /* ---- مزامنة لحظية بين الأجهزة (على مستوى الطالب) ---- */
 let unsubStudents = null, refreshTimer = null;
 function stopRealtimeSync(){ if(unsubStudents){ try{ unsubStudents(); }catch(e){} unsubStudents = null; } }
+function locateStudent(id){
+  let i = DATA.findIndex(s=>s.id===id);
+  if(i>=0) return { arr:DATA, i, archived:false };
+  i = ARCHIVE.findIndex(s=>s.id===id);
+  if(i>=0) return { arr:ARCHIVE, i, archived:true };
+  return null;
+}
 function startRealtimeSync(){
   stopRealtimeSync();
   if(STORAGE_MODE !== 'v2' || !currentUID) return;
@@ -256,23 +267,24 @@ function startRealtimeSync(){
     let changed = false;
     snap.docChanges().forEach(ch=>{
       if(ch.doc.metadata.hasPendingWrites) return;      // ده تعديل من الجهاز ده نفسه
-      const id = ch.doc.id, idx = DATA.findIndex(s=>s.id===id);
-      const local = idx>=0 ? DATA[idx] : null;
+      const id = ch.doc.id, loc = locateStudent(id);
+      const local = loc ? loc.arr[loc.i] : null;
       const clean = local ? canon(local)===SAVED.students.get(id) : true;   // false = عليه تعديل لسه ما اترفعش
       if(ch.type === 'removed'){
-        if(local && clean){ DATA.splice(idx,1); SAVED.students.delete(id); changed = true; }
+        if(local && clean){ loc.arr.splice(loc.i,1); SAVED.students.delete(id); changed = true; }
         return;
       }
       const data = ch.doc.data(); if(!data.id) data.id = id;
-      const js = canon(data);
-      if(!local){ DATA.push(data); SAVED.students.set(id, js); changed = true; }
+      const js = canon(data), wantArchive = !!data.archived;
+      if(!local){ (wantArchive?ARCHIVE:DATA).push(data); SAVED.students.set(id, js); changed = true; }
       else if(clean && js !== SAVED.students.get(id)){
         Object.keys(local).forEach(k=> delete local[k]);
         Object.assign(local, data);
+        if(wantArchive !== loc.archived){ loc.arr.splice(loc.i,1); (wantArchive?ARCHIVE:DATA).push(local); }
         SAVED.students.set(id, canon(local)); changed = true;
       }
     });
-    if(changed){ clearTimeout(refreshTimer); refreshTimer = setTimeout(softRefresh, 400); }
+    if(changed){ updateArchiveTab(); clearTimeout(refreshTimer); refreshTimer = setTimeout(softRefresh, 400); }
   }, err=> console.warn('realtime sync error', err && err.code));
 }
 function softRefresh(){
@@ -284,6 +296,7 @@ function softRefresh(){
     else if(vis('groupView')){ renderGroupStudentList(); renderGroupStats(); renderGroupPayments(); }
     else if(vis('incomeView')) renderIncomeData();
     else if(vis('arrearsView')) renderArrears();
+    else if(vis('archiveView')) renderArchive();
     else if(vis('profileView') && currentProfileId && DATA.some(s=>s.id===currentProfileId)) renderProfile(currentProfileId);
     showToast('🔄 اتحدّثت بيانات من جهاز تاني');
   }catch(e){ console.warn(e); }
@@ -291,7 +304,7 @@ function softRefresh(){
 
 /* ---- النسخ الاحتياطي ---- */
 function backupPayload(){
-  return { version:2, exportedAt:new Date().toISOString(), students:DATA, groups:GROUPS, activeSession:ACTIVE_SESSION, sessions:SESSIONS, settings:SETTINGS };
+  return { version:2, exportedAt:new Date().toISOString(), students:DATA.concat(ARCHIVE), groups:GROUPS, activeSession:ACTIVE_SESSION, sessions:SESSIONS, settings:SETTINGS };
 }
 function downloadBackup(label, silent){
   const blob = new Blob([JSON.stringify(backupPayload(),null,2)], {type:'application/json'});
@@ -367,6 +380,7 @@ function showView(name){
   document.getElementById('monthsView').style.display = name==='months' ? '' : 'none';
   document.getElementById('incomeView').style.display = name==='income' ? '' : 'none';
   document.getElementById('arrearsView').style.display = name==='arrears' ? '' : 'none';
+  const _av = document.getElementById('archiveView'); if(_av) _av.style.display = name==='archive' ? '' : 'none';
   document.getElementById('dropoutsView').style.display = name==='dropouts' ? '' : 'none';
   document.getElementById('notifyView').style.display = name==='notify' ? '' : 'none';
   document.getElementById('reportsView').style.display = name==='reports' ? '' : 'none';
@@ -395,6 +409,8 @@ function pushCurrentView(){
     restore = ()=>{ showView('income'); renderIncome(); };
   }else if(vis('arrearsView')){
     restore = ()=>{ showView('arrears'); renderArrears(); };
+  }else if(document.getElementById('archiveView') && vis('archiveView')){
+    restore = ()=>{ showView('archive'); renderArchive(); };
   }else if(vis('dropoutsView')){
     restore = ()=>{ showView('dropouts'); renderDropouts(); };
   }else if(vis('notifyView')){
@@ -422,6 +438,7 @@ document.getElementById('tabs').addEventListener('click', (e)=>{
   if(btn.dataset.tab==='months'){ monthsGroupId = undefined; showView('months'); renderMonths(); }
   if(btn.dataset.tab==='income'){ showView('income'); renderIncome(); }
   if(btn.dataset.tab==='arrears'){ showView('arrears'); renderArrears(); }
+  if(btn.dataset.tab==='archive'){ showView('archive'); renderArchive(); }
   if(btn.dataset.tab==='dropouts'){ showView('dropouts'); renderDropouts(); }
   if(btn.dataset.tab==='notify'){ showView('notify'); renderNotify(); }
   if(btn.dataset.tab==='reports'){ showView('reports'); renderReports(); }
@@ -931,6 +948,7 @@ function renderGroupView(){
       </label>
       <span id="selCount" style="font-size:12px; color:var(--ink-soft);"></span>
       <button class="btn outline small" id="bulkMoveBtn" style="margin-right:auto;" disabled>➡ نقل المحددين لمجموعة تانية</button>
+      <button class="btn outline small" id="bulkArchiveBtn" disabled>📦 أرشفة المحددين</button>
     </div>
     <div class="student-list" id="groupStudentList" style="margin-top:10px;"></div>
 
@@ -987,6 +1005,12 @@ function renderGroupView(){
     renderGroupStudentList();
   };
   document.getElementById('bulkMoveBtn').onclick = ()=> openBulkMoveModal();
+  document.getElementById('bulkArchiveBtn').onclick = async ()=>{
+    if(!selectedIds.size) return;
+    if(!confirm(`تنقل ${selectedIds.size} طالب للأرشيف؟ (بياناتهم محفوظة وتقدر ترجّعهم)`)) return;
+    const n = await archiveStudents(Array.from(selectedIds));
+    selectedIds.clear(); showToast(`📦 اتنقل ${n} طالب للأرشيف`); renderGroupView();
+  };
 
   const scanInput = document.getElementById('scanInput');
   scanInput.focus();
@@ -1019,6 +1043,14 @@ function renderGroupStats(){
 
 function handleGroupScan(code){
   const box=document.getElementById('scanResult'); const s=DATA.find(x=>x.barcode===code);
+  if(!s){
+    const ar = ARCHIVE.find(x=>x.barcode===code);
+    if(ar){
+      box.innerHTML = `<div class="card scan-result-card warn"><p>📦 الطالب <b>${escapeHtml(ar.name)}</b> في الأرشيف${ar.archivedAt?` (من ${escapeHtml(archDateLabel(ar.archivedAt))})`:''}.</p><div class="sr-actions"><button class="btn gold" id="restoreFromScan">♻ استعادة الطالب</button></div></div>`;
+      document.getElementById('restoreFromScan').onclick = ()=> openRestoreModal(ar.id, ()=>handleGroupScan(code), currentGroupId);
+      return;
+    }
+  }
   if(!s){box.innerHTML=`<div class="card scan-result-card miss"><p>❌ لا يوجد طالب بهذا الكود: <b>${escapeHtml(code)}</b></p><button class="btn gold" id="createFromScan">+ إضافة طالب جديد</button></div>`;document.getElementById('createFromScan').onclick=()=>openStudentModal(null,code, IN_SESSION_UI ? (ACTIVE_SESSION?.groupIds?.[0]) : currentGroupId);return;}
   if(IN_SESSION_UI && ACTIVE_SESSION && !ACTIVE_SESSION.groupIds.includes(s.groupId)){
     const other=getGroup(s.groupId);
@@ -1043,7 +1075,7 @@ function handleGroupScan(code){
 // بيرجّع آخر سلسلة غياب متتالية (بيقف عند أول حضور)
 function absenceStreak(s){
   const att = s.attendance || {};
-  const dates = Object.keys(att).sort();          // من الأقدم للأحدث
+  const dates = Object.keys(att).filter(k=>k >= (s.restoredAt||'')).sort();          // من الأقدم للأحدث
   const streak = [];
   for(let i = dates.length - 1; i >= 0; i--){
     if(att[dates[i]] === 'absent') streak.unshift(dates[i]);
@@ -1058,7 +1090,7 @@ function absenceStreak(s){
 function absenceStreakEndingAt(s, dateKey){
   const att = s.attendance || {};
   if(att[dateKey] !== 'absent') return [];
-  const dates = Object.keys(att).sort();
+  const dates = Object.keys(att).filter(k=>k >= (s.restoredAt||'')).sort();
   const idx = dates.indexOf(dateKey);
   const streak = [dateKey];
   for(let i = idx - 1; i >= 0; i--){
@@ -1698,6 +1730,7 @@ function updateBulkToolbar(){
   if(!countEl) return;
   countEl.textContent = selectedIds.size ? `${selectedIds.size} محدد` : '';
   btn.disabled = selectedIds.size===0;
+  const ab = document.getElementById('bulkArchiveBtn'); if(ab) ab.disabled = selectedIds.size===0;
   const visible = getVisibleGroupMembers();
   all.checked = visible.length>0 && visible.every(s=>selectedIds.has(s.id));
 }
@@ -1761,7 +1794,7 @@ function openStudentModal(id, prefillBarcode, forcedGroupId){
       </label>
       <div class="field"><label>ملاحظات</label><textarea id="f_notes" rows="2">${existing?escapeHtml(existing.notes||''):''}</textarea></div>
       <div class="modal-actions">
-        ${existing?'<button class="btn danger" id="delBtn">حذف الطالب</button>':''}
+        ${existing?'<button class="btn danger" id="delBtn">حذف نهائي</button><button class="btn outline" id="archBtn">📦 أرشفة</button>':''}
         <button class="btn outline" id="cancelBtn">إلغاء</button>
         <button class="btn gold" id="saveBtn">حفظ</button>
       </div>
@@ -1771,8 +1804,14 @@ function openStudentModal(id, prefillBarcode, forcedGroupId){
   ov.querySelector('#cancelBtn').onclick = ()=> ov.remove();
   ov.addEventListener('click', (e)=>{ if(e.target===ov) ov.remove(); });
   if(existing){
+    ov.querySelector('#archBtn').onclick = async ()=>{
+      if(!confirm(`تنقل "${existing.name}" للأرشيف؟ (بياناته وحضوره وفلوسه محفوظة وتقدر ترجّعه)`)) return;
+      await archiveStudents([existing.id]);
+      ov.remove(); showView('group'); renderGroupView();
+      showToast('📦 اتنقل للأرشيف');
+    };
     ov.querySelector('#delBtn').onclick = async ()=>{
-      if(confirm('هل أنت متأكد من حذف هذا الطالب نهائيًا؟')){
+      if(confirm('حذف نهائي؟ مش هتقدر ترجّع الطالب ده. (لو عايزه يرجع بعدين استخدم 📦 أرشفة بدل الحذف)')){
         DATA = DATA.filter(s=>s.id!==existing.id);
         await saveData();
         ov.remove();
@@ -1789,6 +1828,8 @@ function openStudentModal(id, prefillBarcode, forcedGroupId){
     if(!barcode){ showToast('لازم كود باركود للطالب'); return; }
     const dup = DATA.find(s=> s.barcode===barcode && (!existing || s.id!==existing.id));
     if(dup){ showToast('هذا الكود مستخدم لطالب آخر بالفعل'); return; }
+    const dupArch = ARCHIVE.find(s=> s.barcode===barcode);
+    if(dupArch){ showToast(`الكود ده بتاع طالب في الأرشيف (${dupArch.name}) — استعيده أو غيّر الكود`); return; }
     const groupId = document.getElementById('f_group').value || null;
     const phone = document.getElementById('f_phone').value.trim();
     const parentPhone = document.getElementById('f_parent').value.trim();
@@ -1854,7 +1895,10 @@ function renderProfile(id){
           <h2>${escapeHtml(s.name)}</h2>
           <div style="color:var(--ink-soft); font-size:13px;">كود الباركود: ${escapeHtml(s.barcode)} ${g?(' | مجموعة: '+escapeHtml(g.name)):' | بدون مجموعة'}</div>
         </div>
-        <button class="btn outline" id="editBtn">✎ تعديل</button>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn outline" id="editBtn">✎ تعديل</button>
+          <button class="btn outline" id="archiveProfileBtn">📦 أرشفة</button>
+        </div>
       </div>
       <div class="info-grid">
         <div class="info-item"><div class="k">تليفون الطالب</div><div class="v">${escapeHtml(s.phone||'—')}</div></div>
@@ -1896,6 +1940,12 @@ function renderProfile(id){
   `;
   document.getElementById('backBtn').onclick = goBack;
   document.getElementById('editBtn').onclick = ()=> openStudentModal(s.id, '', s.groupId);
+  document.getElementById('archiveProfileBtn').onclick = async ()=>{
+    if(!confirm(`تنقل "${s.name}" للأرشيف؟ (بياناته وحضوره وفلوسه محفوظة وتقدر ترجّعه)`)) return;
+    await archiveStudents([s.id]);
+    showToast('📦 اتنقل للأرشيف');
+    NAV_STACK = []; showView('groups'); renderGroupsList();
+  };
   document.getElementById('addGradeBtn').onclick = ()=> openSingleGradeModal(s);
   renderProfileGrades(s);
   document.getElementById('prevM').onclick = ()=>{ currentMonth--; if(currentMonth<0){currentMonth=11; currentYear--;} renderCalendar(s); };
@@ -2747,7 +2797,7 @@ function computeArrears(){
     if(q && !normalizeAr(s.name).includes(q) && !(s.phone||'').includes(q) && !(s.parentPhone||'').includes(q)) return;
     let start = studentStartYm(s); if(floorYm && floorYm > start) start = floorYm;
     const owed = [];
-    monthsBetween(start, endYm).forEach(ym=>{ const i = payInfo(s, ym); if(!i.settled && i.remaining>0) owed.push({ ym, remaining:i.remaining, partial:i.partial }); });
+    monthsBetween(start, endYm).forEach(ym=>{ if(inArchiveGap(s, ym)) return; const i = payInfo(s, ym); if(!i.settled && i.remaining>0) owed.push({ ym, remaining:i.remaining, partial:i.partial }); });
     if(owed.length) out.push({ s, key, owed, total: owed.reduce((a,x)=>a+x.remaining,0) });
   });
   return out;
@@ -2896,7 +2946,7 @@ function parseStudentsSheet(aoa){
   return { rows:out, found:Object.keys(map) };
 }
 function barcodeGen(){
-  const taken = new Set(DATA.map(s=>String(s.barcode||'')));
+  const taken = new Set(DATA.concat(ARCHIVE).map(s=>String(s.barcode||'')));
   let max = 1000;
   taken.forEach(b=>{ if(/^\d{1,9}$/.test(b)) max = Math.max(max, Number(b)); });
   let n = max;
@@ -2939,8 +2989,8 @@ function openStudentsImportModal(g){
 
   function classify(){
     const skip = ov.querySelector('#impSkip').checked;
-    const seenBar = new Set(DATA.map(s=>String(s.barcode||'')).filter(Boolean));
-    const seenKey = new Set(DATA.map(s=>normalizeAr(s.name)+'|'+(s.phone||s.parentPhone||'')));
+    const seenBar = new Set(DATA.concat(ARCHIVE).map(s=>String(s.barcode||'')).filter(Boolean));
+    const seenKey = new Set(DATA.concat(ARCHIVE).map(s=>normalizeAr(s.name)+'|'+(s.phone||s.parentPhone||'')));
     return parsed.rows.map(r=>{
       if(!r.name) return { ...r, status:'skip', why:'بدون اسم' };
       const key = normalizeAr(r.name)+'|'+(r.phone||r.parentPhone||'');
@@ -2985,7 +3035,7 @@ function openStudentsImportModal(g){
     const now = new Date().toISOString();
     ok.forEach(r=>{
       let bc = r.barcode;
-      if(!bc || DATA.some(s=>String(s.barcode)===bc)) bc = gen.next(); else gen.take(bc);
+      if(!bc || DATA.concat(ARCHIVE).some(s=>String(s.barcode)===bc)) bc = gen.next(); else gen.take(bc);
       DATA.push({ id:uid('s'), name:r.name, barcode:bc, groupId:g.id, phone:r.phone, parentPhone:r.parentPhone, fee:r.fee, notes:r.notes,
         notifyParent:true, createdAt:now, attendance:{}, payments:{}, grades:[], notified:{} });
     });
@@ -2995,6 +3045,175 @@ function openStudentsImportModal(g){
     renderGroupView();
   };
 }
+
+/* ============ الأرشيف: طالب مبيحضرش؟ انقله هنا بدل ما تمسحه — وارجّعه وقت ما يرجع ============
+   الطالب المؤرشف بيتخزّن بنفس بياناته (حضور/دفع/درجات) وعليه علامة archived:true،
+   ومبيظهرش في المجموعات ولا الحضور ولا الدخل ولا المتأخرات ولا الإخطارات ولا التقارير. */
+function ensureArchiveUI(){
+  const tabs = document.getElementById('tabs');
+  if(tabs && !tabs.querySelector('[data-tab="archive"]')){
+    const b = document.createElement('button'); b.dataset.tab = 'archive'; b.textContent = '📦 الأرشيف';
+    const anchor = tabs.querySelector('[data-tab="dropouts"]');
+    if(anchor && anchor.nextSibling) tabs.insertBefore(b, anchor.nextSibling); else tabs.appendChild(b);
+  }
+  if(!document.getElementById('archiveView')){
+    const v = document.createElement('div'); v.id = 'archiveView'; v.style.display = 'none';
+    const ref = document.getElementById('dropoutsView');
+    if(ref) ref.parentNode.insertBefore(v, ref.nextSibling);
+  }
+}
+function updateArchiveTab(){
+  const b = document.querySelector('#tabs [data-tab="archive"]');
+  if(b) b.textContent = ARCHIVE.length ? `📦 الأرشيف (${ARCHIVE.length})` : '📦 الأرشيف';
+}
+function archDateLabel(iso){
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleDateString('ar-EG', { day:'2-digit', month:'2-digit', year:'numeric' });
+}
+function ymOfIso(iso){
+  const d = new Date(iso);
+  return isNaN(d) ? ymKey() : `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+}
+function inArchiveGap(s, ym){
+  return (s.archiveGaps||[]).some(g=> ym >= g.from && ym <= g.to);
+}
+
+async function archiveStudents(ids){
+  const now = new Date().toISOString(); let n = 0;
+  ids.forEach(id=>{
+    const i = DATA.findIndex(s=>s.id===id); if(i<0) return;
+    const s = DATA.splice(i,1)[0];
+    const g = getGroup(s.groupId);
+    s.archived = true; s.archivedAt = now;
+    s.archivedGroupId = g ? g.id : null; s.archivedGroupName = g ? g.name : '';
+    ARCHIVE.push(s); selectedIds.delete(id); n++;
+  });
+  updateArchiveTab();
+  await saveData();
+  return n;
+}
+
+function openRestoreModal(id, onDone, defaultGroupId){
+  const s = ARCHIVE.find(x=>x.id===id); if(!s) return;
+  const preferred = [defaultGroupId, s.archivedGroupId, s.groupId].find(g=> g && getGroup(g)) || '';
+  const ov = document.createElement('div'); ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal">
+      <div class="modal-head"><h3>♻ استعادة ${escapeHtml(s.name)}</h3><button class="close" id="rsClose">×</button></div>
+      <div class="modal-body">
+        <div class="field"><label>يرجع لأنهي مجموعة؟</label>
+          <select id="rsGroup"><option value="">بدون مجموعة</option>${GROUPS.map(g=>`<option value="${g.id}" ${g.id===preferred?'selected':''}>${escapeHtml(g.name)}</option>`).join('')}</select></div>
+        <label style="display:flex; align-items:flex-start; gap:8px; font-size:13px; color:var(--ink-soft);">
+          <input type="checkbox" id="rsGap" checked style="margin-top:3px;"> الشهور اللي كان فيها مؤرشف متتحسبش عليه متأخرات
+        </label>
+        <p class="scan-hint">حضوره ودفعاته وكل بياناته القديمة هترجع زي ما هي، وعدّاد الغياب بيبدأ من جديد من النهارده.</p>
+        <button class="btn gold" id="rsGo">♻ استعادة</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  ov.querySelector('#rsClose').onclick = ()=> ov.remove();
+  ov.addEventListener('click', e=>{ if(e.target===ov) ov.remove(); });
+  ov.querySelector('#rsGo').onclick = async ()=>{
+    const r = await restoreStudent(id, ov.querySelector('#rsGroup').value || null, ov.querySelector('#rsGap').checked);
+    ov.remove();
+    if(r) showToast(`♻ تمت استعادة ${r.name}${r.note||''}`);
+    if(onDone) onDone(r);
+    if(document.getElementById('archiveView') && document.getElementById('archiveView').style.display!=='none') renderArchive();
+  };
+}
+async function restoreStudent(id, groupId, exemptGap){
+  const i = ARCHIVE.findIndex(x=>x.id===id); if(i<0) return null;
+  const s = ARCHIVE[i]; let note = '';
+  if(DATA.some(x=>String(x.barcode)===String(s.barcode))){
+    s.barcode = barcodeGen().next(); note = ` (الكود اتغيّر لـ ${s.barcode} لأن القديم مستخدم مع طالب تاني)`;
+  }
+  ARCHIVE.splice(i,1);
+  const from = ymAdd(ymOfIso(s.archivedAt), 1), to = ymAdd(ymKey(), -1);
+  if(exemptGap && from <= to){ s.archiveGaps = s.archiveGaps || []; s.archiveGaps.push({ from, to }); }
+  s.groupId = groupId || null;
+  s.restoredAt = todayKey();
+  delete s.archived; delete s.archivedAt; delete s.archivedGroupId; delete s.archivedGroupName;
+  DATA.push(s);
+  updateArchiveTab();
+  await saveData();
+  return { id:s.id, name:s.name, note };
+}
+
+const archState = { q:'' };
+function archStudentStats(s){
+  const att = s.attendance || {};
+  const keys = Object.keys(att).filter(k=>att[k]==='present'||att[k]==='absent').sort();
+  const present = keys.filter(k=>att[k]==='present'), absent = keys.filter(k=>att[k]==='absent');
+  let paid = 0; Object.keys(s.payments||{}).forEach(ym=>{ paid += payInfo(s, ym).received; });
+  return { present:present.length, absent:absent.length, lastPresent: present[present.length-1]||'', paid };
+}
+function openArchiveDetails(id){
+  const s = ARCHIVE.find(x=>x.id===id); if(!s) return;
+  const st = archStudentStats(s);
+  const ov = document.createElement('div'); ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="modal">
+      <div class="modal-head"><h3>📄 ${escapeHtml(s.name)}</h3><button class="close" id="adClose">×</button></div>
+      <div class="modal-body">
+        <div class="info-grid">
+          <div class="info-item"><div class="k">كود الباركود</div><div class="v">${escapeHtml(s.barcode||'—')}</div></div>
+          <div class="info-item"><div class="k">المجموعة وقت الأرشفة</div><div class="v">${escapeHtml(s.archivedGroupName||'بدون مجموعة')}</div></div>
+          <div class="info-item"><div class="k">تليفون الطالب</div><div class="v">${escapeHtml(s.phone||'—')}</div></div>
+          <div class="info-item"><div class="k">تليفون ولي الأمر</div><div class="v">${escapeHtml(s.parentPhone||'—')}</div></div>
+          <div class="info-item"><div class="k">حضر / غاب</div><div class="v">${st.present} / ${st.absent}</div></div>
+          <div class="info-item"><div class="k">آخر حضور</div><div class="v">${escapeHtml(st.lastPresent||'—')}</div></div>
+          <div class="info-item"><div class="k">إجمالي اللي دفعه</div><div class="v">${st.paid.toLocaleString('ar-EG')} ج.م</div></div>
+          <div class="info-item"><div class="k">تاريخ الأرشفة</div><div class="v">${escapeHtml(archDateLabel(s.archivedAt)||'—')}</div></div>
+        </div>
+        ${s.notes?`<p style="margin-top:10px; font-size:13px; color:var(--ink-soft);">📝 ${escapeHtml(s.notes)}</p>`:''}
+        <button class="btn gold" id="adRestore">♻ استعادة</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  ov.querySelector('#adClose').onclick = ()=> ov.remove();
+  ov.addEventListener('click', e=>{ if(e.target===ov) ov.remove(); });
+  ov.querySelector('#adRestore').onclick = ()=>{ ov.remove(); openRestoreModal(id); };
+}
+function renderArchive(){
+  const view = document.getElementById('archiveView'); if(!view) return;
+  const q = normalizeAr(archState.q);
+  const list = ARCHIVE.filter(s=> !q || normalizeAr(s.name).includes(q) || (s.phone||'').includes(q) || (s.parentPhone||'').includes(q) || String(s.barcode||'').includes(q))
+    .sort((a,b)=> (b.archivedAt||'').localeCompare(a.archivedAt||''));
+  view.innerHTML = `
+    <div class="section-title"><span>📦 الأرشيف</span><span class="pill warn">${ARCHIVE.length} طالب</span><div class="line"></div></div>
+    <div class="card">
+      <p class="scan-hint">الطلاب هنا مش بيظهروا في الحضور ولا الدخل ولا المتأخرات ولا الإخطارات، وبياناتهم محفوظة كاملة. لما حد يرجع دوس ♻ استعادة (أو اعمل مسح لكارته وهيعرض عليك الاستعادة).</p>
+      <div class="search-row"><input type="text" id="archQ" placeholder="ابحث بالاسم أو الكود أو التليفون..." value="${escapeHtml(archState.q)}"></div>
+    </div>
+    ${list.length ? `<div class="student-list">${list.map(s=>`
+      <div class="student-row" style="cursor:default; flex-wrap:wrap; gap:10px;">
+        <div style="flex:1; min-width:200px;">
+          <div class="name">${escapeHtml(s.name)}</div>
+          <div class="meta">${escapeHtml(s.archivedGroupName||'بدون مجموعة')} &nbsp;|&nbsp; اتأرشف: ${escapeHtml(archDateLabel(s.archivedAt)||'—')}</div>
+          <div class="meta">📞 ${escapeHtml(s.phone||'—')} &nbsp;|&nbsp; ولي الأمر: ${escapeHtml(s.parentPhone||'—')} &nbsp;|&nbsp; كود: ${escapeHtml(s.barcode||'—')}</div>
+        </div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+          <button class="btn gold small" data-restore="${s.id}">♻ استعادة</button>
+          <button class="btn outline small" data-details="${s.id}">📄 تفاصيل</button>
+          <button class="btn danger small" data-del="${s.id}">🗑 حذف نهائي</button>
+        </div>
+      </div>`).join('')}</div>` : `<div class="card"><div class="empty">${ARCHIVE.length ? 'مفيش نتايج مطابقة.' : 'الأرشيف فاضي. أي طالب بتأرشفه هيظهر هنا.'}</div></div>`}
+  `;
+  view.querySelector('#archQ').oninput = (e)=>{
+    archState.q = e.target.value; clearTimeout(renderArchive._t);
+    renderArchive._t = setTimeout(()=>{ renderArchive(); const el = document.getElementById('archQ'); if(el){ el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }, 250);
+  };
+  view.querySelectorAll('[data-restore]').forEach(b=> b.onclick = ()=> openRestoreModal(b.dataset.restore));
+  view.querySelectorAll('[data-details]').forEach(b=> b.onclick = ()=> openArchiveDetails(b.dataset.details));
+  view.querySelectorAll('[data-del]').forEach(b=> b.onclick = async ()=>{
+    const s = ARCHIVE.find(x=>x.id===b.dataset.del); if(!s) return;
+    if(!confirm(`حذف نهائي لـ "${s.name}"؟ مش هتقدر ترجّعه تاني.`)) return;
+    ARCHIVE = ARCHIVE.filter(x=>x.id!==s.id);
+    updateArchiveTab(); await saveData();
+    showToast('تم الحذف النهائي'); renderArchive();
+  });
+}
+ensureArchiveUI();
 
 /* ============ Reports & Statistics ============ */
 let reportsYear = new Date().getFullYear();
@@ -3253,7 +3472,7 @@ function computeDropouts(){
   DATA.forEach(s=>{
     const att = s.attendance || {};
     const entries = Object.keys(att)
-      .filter(k=> att[k]==='present' || att[k]==='absent')
+      .filter(k=> (att[k]==='present' || att[k]==='absent') && k >= (s.restoredAt||''))
       .sort((a,b)=> b.localeCompare(a)); // أحدث تاريخ الأول
     if(entries.length < dropoutThreshold) return; // مفيش سجل كافي نحكم بيه لسه
     const lastN = entries.slice(0, dropoutThreshold);
@@ -3282,7 +3501,7 @@ function renderDropouts(){
         حصص على التوالي
       </label>
       <button class="btn gold" id="applyThresholdBtn">تطبيق</button>
-      <button class="btn danger" id="delAllDropoutsBtn" style="margin-right:auto;">🗑 حذف كل اللي في القايمة</button>
+      <button class="btn gold" id="archiveAllDropoutsBtn" style="margin-right:auto;">📦 أرشفة كل اللي في القايمة</button>
     </div>
     <div id="dropoutsList"></div>
   `;
@@ -3291,14 +3510,12 @@ function renderDropouts(){
     dropoutThreshold = (v && v>0) ? v : 4;
     renderDropoutsList();
   };
-  document.getElementById('delAllDropoutsBtn').onclick = async ()=>{
+  document.getElementById('archiveAllDropoutsBtn').onclick = async ()=>{
     const rows = computeDropouts();
     if(rows.length===0){ showToast('مفيش حد في القايمة'); return; }
-    if(!confirm(`هتحذف ${rows.length} طالب نهائيًا من السيستم. متأكد؟`)) return;
-    const ids = new Set(rows.map(r=>r.s.id));
-    DATA = DATA.filter(s=>!ids.has(s.id));
-    await saveData();
-    showToast(`تم حذف ${rows.length} طالب`);
+    if(!confirm(`هتنقل ${rows.length} طالب للأرشيف. بياناتهم محفوظة كاملة وتقدر ترجّعهم في أي وقت. تمام؟`)) return;
+    const n = await archiveStudents(rows.map(r=>r.s.id));
+    showToast(`📦 اتنقل ${n} طالب للأرشيف`);
     renderDropoutsList();
   };
   renderDropoutsList();
@@ -3324,21 +3541,20 @@ function renderDropoutsList(){
       </div>
       <div style="display:flex; gap:8px; align-items:center;">
         <button class="btn outline small viewProfileBtn" data-id="${s.id}">👤 بروفايل</button>
-        <button class="btn danger small delDropoutBtn" data-id="${s.id}">🗑 حذف</button>
+        <button class="btn gold small archDropoutBtn" data-id="${s.id}">📦 أرشفة</button>
       </div>
     </div>`;
   }).join('') + `</div>`;
   list.querySelectorAll('.viewProfileBtn').forEach(b=>{
     b.onclick = ()=> openProfile(b.dataset.id);
   });
-  list.querySelectorAll('.delDropoutBtn').forEach(b=>{
+  list.querySelectorAll('.archDropoutBtn').forEach(b=>{
     b.onclick = async ()=>{
       const s = DATA.find(x=>x.id===b.dataset.id);
       if(!s) return;
-      if(confirm(`هل أنت متأكد من حذف "${s.name}" نهائيًا من السيستم؟`)){
-        DATA = DATA.filter(x=>x.id!==s.id);
-        await saveData();
-        showToast('تم حذف الطالب');
+      if(confirm(`تنقل "${s.name}" للأرشيف؟ (بياناته محفوظة وتقدر ترجّعه)`)){
+        await archiveStudents([s.id]);
+        showToast('📦 اتنقل للأرشيف');
         renderDropoutsList();
       }
     };
@@ -3418,6 +3634,7 @@ document.getElementById('settingsBtn').onclick = ()=>{
         if(parsed.settings && typeof parsed.settings==='object') SETTINGS = Object.assign({...DEFAULT_SETTINGS}, parsed.settings);
       }else{ showToast('ملف غير صالح'); return; }
       DATA.forEach(s=>{ if(!s.id) s.id = uid('s'); });
+      partitionArchive(); updateArchiveTab();
       await saveData();
       showToast('تم استيراد البيانات');
       ov.remove();
@@ -3427,7 +3644,8 @@ document.getElementById('settingsBtn').onclick = ()=>{
   ov.querySelector('#resetBtn').onclick = async ()=>{
     if(confirm('هل أنت متأكد من حذف كل البيانات (الطلاب والمجموعات)؟ لا يمكن التراجع.')){
       downloadBackup('قبل-الحذف', true);
-      DATA = []; GROUPS = []; ACTIVE_SESSION = null; SESSIONS = [];
+      DATA = []; ARCHIVE = []; GROUPS = []; ACTIVE_SESSION = null; SESSIONS = [];
+      updateArchiveTab();
       await saveData();
       ov.remove();
       showView('groups'); renderGroupsList();
@@ -3487,7 +3705,7 @@ auth.onAuthStateChanged(async (user)=>{
     showView('groups');
     renderGroupsList();
   }else{
-    stopRealtimeSync(); LOAD_OK = false; DATA = []; GROUPS = []; SESSIONS = []; ACTIVE_SESSION = null;
+    stopRealtimeSync(); LOAD_OK = false; DATA = []; ARCHIVE = []; GROUPS = []; SESSIONS = []; ACTIVE_SESSION = null;
     currentUID = null;
     document.getElementById('authScreen').style.display='';
     document.getElementById('appWrap').style.display='none';
