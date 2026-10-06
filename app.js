@@ -54,6 +54,8 @@ function normalizeSessionRecord(rec){
     groupIds: rec.groupIds,
     days: Array.isArray(rec.days) ? rec.days.slice() : (rec.date ? [rec.date] : []),
     resolvedGroupIds: Array.isArray(rec.resolvedGroupIds) ? rec.resolvedGroupIds.slice() : [],
+    date: rec.date || null,
+    continuation: typeof rec.continuation === 'boolean' ? rec.continuation : true,
     status: rec.status === 'completed' ? 'completed' : 'pending',
     createdAt: rec.createdAt || rec.openedAt || new Date().toISOString(),
     updatedAt: rec.updatedAt || new Date().toISOString()
@@ -110,8 +112,13 @@ async function loadData(){
     partitionArchive();
 
     const raw = d.activeSession;
+    let staleSingleDay = null;
     if(raw && Array.isArray(raw.groupIds) && raw.groupIds.length){
-      if(raw.date === todayKey()){
+      if(raw.date !== todayKey() && raw.continuation === false){
+        // حصة يوم واحد (بدون استكمال) فضلت مفتوحة لتاني يوم: تتقفل تلقائيًا بعد التحميل، بتاريخ يومها هي
+        staleSingleDay = normalizeSessionRecord(raw);
+        ACTIVE_SESSION = null;
+      }else if(raw.date === todayKey()){
         // حصة مفتوحة من نفس اليوم: تكمل عادي زي ما هي (بيانات الحضور المسجلة فيها محفوظة كما هي)
         ACTIVE_SESSION = normalizeSessionRecord(raw);
         ACTIVE_SESSION.date = todayKey();
@@ -128,6 +135,13 @@ async function loadData(){
     SAVED.students = new Map(DATA.concat(ARCHIVE).map(s=>[s.id, canon(s)]));
     SAVED.meta = {}; META_KEYS.forEach(k=> SAVED.meta[k] = canon(baseMeta[k]));
     LOAD_OK = true;
+    if(staleSingleDay){
+      const r = singleDayAbsences(staleSingleDay);
+      // لو محدش اتسجل حاضر خالص، غالبًا الحصة اتفتحت بالغلط: نقفلها من غير ما نسجل غياب لحد
+      if(r.anyPresent){ applySingleDayAbsences(r); showToast(`حصة ${prettyDate(r.date)} اتقفلت تلقائيًا — اتسجّل غياب ${r.notPresent.length} طالب بتاريخها`); }
+      else showToast(`حصة ${prettyDate(r.date)} اتقفلت تلقائيًا بدون تسجيل غياب (محدش حضر فيها)`);
+      saveData();
+    }
   }catch(e){
     console.error(e);
     DATA = []; ARCHIVE = []; GROUPS = []; SESSIONS = []; LOAD_OK = false;
@@ -367,6 +381,23 @@ function arabicDayForDate(dateKey){
 function isGroupScheduledOnDate(group, dateKey){
   if(!group || !Array.isArray(group.days) || !group.days.length) return true;
   return group.days.includes(arabicDayForDate(dateKey));
+}
+
+// هل الحصة محتاجة استكمال؟ لا لو كل المجموعات المختارة يومها هو يوم فتح الحصة، نعم لو فيه مجموعة يومها في يوم تاني
+function sessionModeInfo(groupIds, dateKey){
+  const later = groupIds.map(getGroup).filter(g=>g && !isGroupScheduledOnDate(g, dateKey));
+  return { continuation: later.length > 0, later };
+}
+// حصة اليوم الواحد (بدون استكمال): الطلاب اللي مسجلوش حضور يتسجل لهم غياب بتاريخ يوم الحصة نفسه
+function singleDayAbsences(rec){
+  const date = rec.date || todayKey();
+  const dates = Array.from(new Set([...(rec.days||[]), date]));
+  const members = DATA.filter(s=>rec.groupIds.includes(s.groupId));
+  const isPresent = s => dates.some(d=>(s.attendance||{})[d]==='present');
+  return { date, members, anyPresent: members.some(isPresent), notPresent: members.filter(s=>!isPresent(s)) };
+}
+function applySingleDayAbsences(r){
+  r.notPresent.forEach(s=>{ s.attendance = s.attendance || {}; if(!s.attendance[r.date]) s.attendance[r.date] = 'absent'; });
 }
 
 /* ============ Navigation ============ */
@@ -659,15 +690,27 @@ function openNewSessionModal(){
     <div class="field"><label>المجموعات</label><div id="sessionGroups" style="display:flex;flex-direction:column;gap:8px;">
       ${GROUPS.map(g=>`<label style="display:flex;align-items:center;gap:8px;background:#1f2330;border:1px solid var(--rule);padding:10px;border-radius:8px;cursor:pointer;"><input type="checkbox" value="${g.id}"> <b>${escapeHtml(g.name)}</b><span style="margin-right:auto;color:var(--ink-soft);font-size:11px;">${escapeHtml(groupLabel(g))}</span></label>`).join('')}
     </div></div>
+    <p id="sessionModeHint" style="font-size:12px;color:var(--ink-soft);margin:6px 0 0;min-height:18px;"></p>
     <div class="modal-actions"><button class="btn outline" id="cancelSession">إلغاء</button><button class="btn gold" id="confirmSession">بدء الحصة</button></div>
   </div>`;
   document.body.appendChild(ov);
   ov.querySelector('#cancelSession').onclick=()=>ov.remove();
   ov.addEventListener('click',e=>{if(e.target===ov)ov.remove();});
+  const hint = ov.querySelector('#sessionModeHint');
+  const updHint = ()=>{
+    const ids=[...ov.querySelectorAll('input:checked')].map(x=>x.value);
+    if(!ids.length){ hint.textContent=''; return; }
+    const m = sessionModeInfo(ids, todayKey());
+    hint.innerHTML = m.continuation
+      ? `🔁 <b>${m.later.map(g=>escapeHtml(g.name)).join(' + ')}</b> يومها مش النهارده — الحصة هتبقى قابلة للاستكمال لحد ما ييجي يومها.`
+      : `✅ كل المجموعات يومها النهارده — الحصة هتخلص نهائيًا أول ما تقفلها (بدون استكمال)، ولو نسيت تقفلها هتتقفل لوحدها تاني يوم.`;
+  };
+  ov.querySelectorAll('input[type=checkbox]').forEach(c=>c.onchange=updHint);
   ov.querySelector('#confirmSession').onclick=async()=>{
     const groupIds=[...ov.querySelectorAll('input:checked')].map(x=>x.value);
     if(!groupIds.length){showToast('اختار مجموعة واحدة على الأقل');return;}
-    ACTIVE_SESSION={id:uid('session'),date:todayKey(),groupIds,openedAt:new Date().toISOString(),days:[],resolvedGroupIds:[]};
+    const mode = sessionModeInfo(groupIds, todayKey());
+    ACTIVE_SESSION={id:uid('session'),date:todayKey(),groupIds,openedAt:new Date().toISOString(),days:[],resolvedGroupIds:[],continuation:mode.continuation};
     await saveData(); ov.remove(); pushCurrentView(); renderSessionView();
   };
 }
@@ -815,6 +858,17 @@ function renderSessionPendingList(){
 }
 
 async function closeActiveSession(){
+  if(ACTIVE_SESSION.continuation === false){
+    const r = singleDayAbsences(ACTIVE_SESSION);
+    if(!confirm(`الحصة تشمل ${r.members.length} طالب — كل المجموعات يومها ${prettyDate(r.date)}.\nسيُسجل الغياب لـ ${r.notPresent.length} طالب، والحصة هتخلص نهائيًا (بدون استكمال).\nمتأكد؟`)) return;
+    applySingleDayAbsences(r);
+    SESSIONS = SESSIONS.filter(x => x.id !== ACTIVE_SESSION.id);
+    ACTIVE_SESSION = null; sessionScanOrder = [];
+    await saveData();
+    showToast(`تم إغلاق الحصة نهائيًا — اتسجّل غياب ${r.notPresent.length} طالب`);
+    if(!offerNotifications()){ showView('groups'); renderGroupsList(); }
+    return;
+  }
   const today = todayKey();
   const members = DATA.filter(s => ACTIVE_SESSION.groupIds.includes(s.groupId));
   const resolvedSoFar = ACTIVE_SESSION.resolvedGroupIds || [];
@@ -1061,6 +1115,9 @@ function handleGroupScan(code){
     const other=getGroup(s.groupId); box.innerHTML=`<div class="card scan-result-card warn"><p>⚠ الطالب <b>${escapeHtml(s.name)}</b> مسجّل في مجموعة تانية${other?(': '+escapeHtml(other.name)):''}.</p><div class="sr-actions"><button class="btn gold" id="moveHereBtn">انقله لهذه المجموعة وسجّل حضوره</button><button class="btn outline" id="viewAnywayBtn">عرض بياناته فقط</button></div></div>`;
     document.getElementById('moveHereBtn').onclick=async()=>{s.groupId=currentGroupId;markPresentToday(s);await saveData();renderScanResultCard(s,true);renderGroupStudentList();renderGroupStats();};
     document.getElementById('viewAnywayBtn').onclick=()=>openProfile(s.id); return;
+  }
+  if(IN_SESSION_UI && ACTIVE_SESSION && ACTIVE_SESSION.continuation===false && ACTIVE_SESSION.date && ACTIVE_SESSION.date!==todayKey()){
+    showToast('الحصة دي من يوم سابق — اقفلها الأول وبعدين ابدأ حصة جديدة'); return;
   }
   const alreadyPresent=(s.attendance||{})[todayKey()] === 'present';
   markPresentToday(s);
