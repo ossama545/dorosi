@@ -403,6 +403,9 @@ function applySingleDayAbsences(r){
 /* ============ Navigation ============ */
 let currentGroupId = null;
 let currentProfileId = null;
+let ACTIVE_STUDENT_ID = null; // آخر طالب تم تأكيد حضوره (بالكارت أو يدويًا) لاستخدام اختصارات الدفع
+let QUICK_PAYMENT_OVERLAY = null;
+let QUICK_PAYMENT_BUSY = false;
 
 function showView(name){
   IN_SESSION_UI = false; // أي انتقال صريح لشاشة جديدة يلغي وضع "شاشة الحصة" افتراضيًا؛ renderSessionView بيفعّله تاني بعد النداء
@@ -1096,6 +1099,7 @@ function renderGroupStats(){
 }
 
 function handleGroupScan(code){
+  ACTIVE_STUDENT_ID = null; // لا نسمح بتوجيه دفعة لطالب سابق إذا فشل التعرف على الكارت الحالي
   const box=document.getElementById('scanResult'); const s=DATA.find(x=>x.barcode===code);
   if(!s){
     const ar = ARCHIVE.find(x=>x.barcode===code);
@@ -1113,13 +1117,14 @@ function handleGroupScan(code){
   }
   if(!IN_SESSION_UI && s.groupId!==currentGroupId){
     const other=getGroup(s.groupId); box.innerHTML=`<div class="card scan-result-card warn"><p>⚠ الطالب <b>${escapeHtml(s.name)}</b> مسجّل في مجموعة تانية${other?(': '+escapeHtml(other.name)):''}.</p><div class="sr-actions"><button class="btn gold" id="moveHereBtn">انقله لهذه المجموعة وسجّل حضوره</button><button class="btn outline" id="viewAnywayBtn">عرض بياناته فقط</button></div></div>`;
-    document.getElementById('moveHereBtn').onclick=async()=>{s.groupId=currentGroupId;markPresentToday(s);await saveData();renderScanResultCard(s,true);renderGroupStudentList();renderGroupStats();};
+    document.getElementById('moveHereBtn').onclick=async()=>{s.groupId=currentGroupId;ACTIVE_STUDENT_ID=s.id;markPresentToday(s);await saveData();renderScanResultCard(s,true);renderGroupStudentList();renderGroupStats();};
     document.getElementById('viewAnywayBtn').onclick=()=>openProfile(s.id); return;
   }
   if(IN_SESSION_UI && ACTIVE_SESSION && ACTIVE_SESSION.continuation===false && ACTIVE_SESSION.date && ACTIVE_SESSION.date!==todayKey()){
     showToast('الحصة دي من يوم سابق — اقفلها الأول وبعدين ابدأ حصة جديدة'); return;
   }
   const alreadyPresent=(s.attendance||{})[todayKey()] === 'present';
+  ACTIVE_STUDENT_ID = s.id;
   markPresentToday(s);
   if(IN_SESSION_UI && ACTIVE_SESSION && !sessionScanOrder.includes(s.id)) sessionScanOrder.unshift(s.id);
   saveData();
@@ -1701,6 +1706,7 @@ function manualMarkPresent(id){
   const s=DATA.find(x=>x.id===id);
   if(!s) return;
   const alreadyPresent=(s.attendance||{})[todayKey()]==='present';
+  ACTIVE_STUDENT_ID = s.id;
   markPresentToday(s);
   s.manualAttendance = s.manualAttendance || {};
   s.manualAttendance[todayKey()] = true;   // علامة إن الحضور اتسجل يدوي مش بالكارت
@@ -1738,7 +1744,7 @@ function renderScanResultCard(s,justRegistered){
   if(currentPaid){payHtml=`<span class="pill paid">دفع شهر ${curNum} ✓</span>${!prevPaid?`<div style="margin-top:7px;"><span class="pill unpaid">لم يتم دفع شهر ${prevNum}</span></div>`:''}`;}
   else if(prevPaid){payHtml=`<div style="display:flex;flex-direction:column;gap:8px;"><span class="pill paid" style="width:max-content;">دفع شهر ${prevNum} ✓</span><button class="btn gold" id="payCurrentBtn">💳 دفع الشهر الحالي (${curNum})</button></div>`;}
   else{payHtml=`<div style="display:flex;flex-direction:column;gap:8px;"><span class="pill unpaid" style="width:max-content;">لم يتم دفع شهر ${prevNum}</span><div class="sr-actions" style="margin-top:0;"><button class="btn gold" id="payCurrentBtn">💳 دفع الشهر الحالي (${curNum})</button><button class="btn outline" id="payPreviousBtn">💳 دفع الشهر السابق (${prevNum})</button></div></div>`;}
-  box.innerHTML=`<div class="card scan-result-card"><div class="sr-head"><div><p class="sr-name">✔ ${escapeHtml(s.name)}</p><div style="color:var(--ink-soft);font-size:12px;">${justRegistered?'تم تسجيل حضور اليوم':'الطالب مسجّل حضور اليوم بالفعل'}</div><div style="margin-top:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${lastHtml}</div></div><div>${payHtml}</div></div><div class="info-grid" style="margin-top:12px;"><div class="info-item"><div class="k">تليفون الطالب</div><div class="v">${escapeHtml(s.phone||'—')}</div></div><div class="info-item"><div class="k">تليفون ولي الأمر</div><div class="v">${escapeHtml(s.parentPhone||'—')}</div></div><div class="info-item"><div class="k">الاشتراك الشهري</div><div class="v">${s.fee||0} ج.م</div></div></div><div class="sr-actions"><button class="btn outline" id="editFromScanBtn">✎ تعديل بيانات</button><button class="btn outline" id="fullProfileBtn">📅 السجل الكامل</button></div></div>`;
+  box.innerHTML=`<div class="card scan-result-card"><div class="sr-head"><div><p class="sr-name">✔ ${escapeHtml(s.name)}</p><div style="color:var(--ink-soft);font-size:12px;">${justRegistered?'تم تسجيل حضور اليوم':'الطالب مسجّل حضور اليوم بالفعل'}</div><div style="margin-top:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${lastHtml}</div></div><div>${payHtml}</div></div><div class="info-grid" style="margin-top:12px;"><div class="info-item"><div class="k">تليفون الطالب</div><div class="v">${escapeHtml(s.phone||'—')}</div></div><div class="info-item"><div class="k">تليفون ولي الأمر</div><div class="v">${escapeHtml(s.parentPhone||'—')}</div></div><div class="info-item"><div class="k">الاشتراك الشهري</div><div class="v">${s.fee||0} ج.م</div></div></div><div class="sr-actions"><button class="btn outline" id="editFromScanBtn">✎ تعديل بيانات</button><button class="btn outline" id="fullProfileBtn">📅 السجل الكامل</button></div><div class="quick-pay-hints">اختصارات الدفع: <kbd>F2</kbd> دفع الشهر الحالي · <kbd>F3</kbd> دفع سريع · <kbd>F4</kbd> سجل المدفوعات</div></div>`;
   function recordPayment(ym){
     openPaymentModal(s, ym, ()=>{ renderScanResultCard(s,false); renderGroupStudentList(); renderGroupStats(); renderGroupPayments(); });
   }
@@ -1905,6 +1911,7 @@ function openStudentModal(id, prefillBarcode, forcedGroupId){
     if(IN_SESSION_UI && ACTIVE_SESSION && groupId && ACTIVE_SESSION.groupIds.includes(groupId)){
       const newStudent = DATA.find(x=>x.id===savedId);
       markPresentToday(newStudent);
+      ACTIVE_STUDENT_ID = savedId;
       if(!sessionScanOrder.includes(savedId)) sessionScanOrder.unshift(savedId);
       await saveData();
       ov.remove();
@@ -2490,7 +2497,7 @@ function openPaymentModal(s, ym, onDone){
     if(old.paid){ if(amt>0) old.due = amt; else old.exempt = true; }
   }
   let dueDraft = null;
-  const ov = document.createElement('div'); ov.className = 'overlay';
+  const ov = document.createElement('div'); ov.className = 'overlay payment-record-overlay';
   document.body.appendChild(ov);
   ov.addEventListener('click', e=>{ if(e.target===ov) ov.remove(); });
   const getRec = ()=>{ if(!s.payments[ym]) s.payments[ym] = { paid:false, amount:0, date:'', due:Number(s.fee)||0, entries:[] }; return s.payments[ym]; };
@@ -2549,6 +2556,8 @@ function openPaymentModal(s, ym, onDone){
       await commit(e.target.checked ? 'اتسجّل الشهر معفى' : null);
     };
     ov.querySelector('#pmAdd').onclick = async ()=>{
+      const currentInfo = payInfo(s, ym);
+      if(currentInfo.settled){ showToast(`الطالب قام بدفع ${ymLabel(ym)} بالفعل`); return; }
       const amount = Number(ov.querySelector('#pmAmt').value);
       const date = ov.querySelector('#pmDate').value;
       const note = ov.querySelector('#pmNote').value.trim();
@@ -3713,6 +3722,174 @@ document.getElementById('settingsBtn').onclick = ()=>{
 
 /* ============ Auth ============ */
 function authErr(msg){ document.getElementById('authError').textContent = msg; }
+
+/* ============ Keyboard shortcuts: quick student payments ============ */
+function activeStudentForPayment(){
+  const s = ACTIVE_STUDENT_ID ? DATA.find(x=>x.id===ACTIVE_STUDENT_ID) : null;
+  if(!s){ showToast('امسح كارت الطالب وسجّل حضوره أولاً'); return null; }
+  return s;
+}
+function paymentRefreshAfterShortcut(s){
+  const scanBox=document.getElementById('scanResult');
+  if(scanBox && scanBox.innerHTML && ACTIVE_STUDENT_ID===s.id) renderScanResultCard(s,false);
+  if(document.getElementById('groupStudentList')) renderGroupStudentList();
+  if(document.getElementById('groupStats')) renderGroupStats();
+  if(document.getElementById('groupPayBox')) renderGroupPayments();
+  if(document.getElementById('sessionPresentList')) renderSessionPresentList();
+  if(document.getElementById('sessionPendingList')) renderSessionPendingList();
+  if(document.getElementById('sessionCounterRow')) renderSessionCounter();
+}
+function closeQuickPayment(){
+  if(QUICK_PAYMENT_OVERLAY){ QUICK_PAYMENT_OVERLAY.remove(); QUICK_PAYMENT_OVERLAY=null; }
+  QUICK_PAYMENT_BUSY=false;
+}
+function showQuickPaymentConfirm(s, ym){
+  if(QUICK_PAYMENT_OVERLAY) return;
+  const info=payInfo(s,ym);
+  if(info.settled){ showToast(`الطالب ${s.name} دفع ${ymLabel(ym)} بالفعل`); return; }
+  const amount=info.remaining>0 ? info.remaining : (Number(s.fee)||0);
+  if(!(amount>0)){ showToast('لا يوجد مبلغ مستحق لهذا الشهر — راجع قيمة الاشتراك'); return; }
+  const g=getGroup(s.groupId);
+  const ov=document.createElement('div');
+  ov.className='overlay quick-payment-overlay';
+  ov.innerHTML=`
+    <div class="modal quick-payment-modal" role="dialog" aria-modal="true" aria-labelledby="quickPayTitle">
+      <div class="modal-head"><h3 id="quickPayTitle">تأكيد تسجيل الدفع</h3><button class="close" id="quickPayClose" aria-label="إغلاق">×</button></div>
+      <div class="quick-pay-summary">
+        <div><span>الطالب</span><b>${escapeHtml(s.name)}</b></div>
+        <div><span>المجموعة</span><b>${escapeHtml(g?.name||'بدون مجموعة')}</b></div>
+        <div><span>الشهر</span><b>${escapeHtml(ymLabel(ym))}</b></div>
+        <div><span>المبلغ المستحق</span><b class="quick-pay-amount">${amount.toLocaleString('ar-EG')} جنيه</b></div>
+        ${info.partial?`<div><span>المدفوع سابقًا</span><b>${info.received.toLocaleString('ar-EG')} جنيه</b></div>`:''}
+      </div>
+      <p class="quick-pay-note">لن يتم تسجيل أي دفعة إلا بعد التأكيد.</p>
+      <div class="modal-actions">
+        <button class="btn outline" id="quickPayCancel">إلغاء <kbd>Esc</kbd></button>
+        <button class="btn gold" id="quickPayConfirm">تأكيد الدفع <kbd>Enter</kbd></button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov); QUICK_PAYMENT_OVERLAY=ov;
+  const cancel=()=>closeQuickPayment();
+  ov.querySelector('#quickPayClose').onclick=cancel;
+  ov.querySelector('#quickPayCancel').onclick=cancel;
+  ov.addEventListener('click',e=>{if(e.target===ov) cancel();});
+  ov.querySelector('#quickPayConfirm').onclick=async()=>{
+    if(QUICK_PAYMENT_BUSY) return;
+    if(ACTIVE_STUDENT_ID!==s.id || !DATA.some(x=>x.id===s.id)){ showToast('تغير الطالب النشط — أعد مسح الكارت'); closeQuickPayment(); return; }
+    const latest=payInfo(s,ym);
+    if(latest.settled){ showToast('الطالب قام بالدفع لهذا الشهر بالفعل'); closeQuickPayment(); return; }
+    const due=latest.due>0?latest.due:(Number(s.fee)||0);
+    const remaining=latest.remaining>0?latest.remaining:due;
+    if(!(remaining>0)){ showToast('لا يوجد مبلغ مستحق للتسجيل'); closeQuickPayment(); return; }
+    QUICK_PAYMENT_BUSY=true;
+    const rec=(s.payments=s.payments||{})[ym] || (s.payments[ym]={paid:false,amount:0,date:'',due,entries:[]});
+    if(!Array.isArray(rec.entries)){
+      const oldAmount=Number(rec.amount)||0;
+      rec.entries=(rec.paid&&oldAmount>0)?[{id:uid('p'),amount:oldAmount,date:rec.date||'',note:'',no:null}]:[];
+      if(rec.paid){ if(oldAmount>0) rec.due=oldAmount; else rec.exempt=true; }
+    }
+    if(rec.exempt){ QUICK_PAYMENT_BUSY=false; closeQuickPayment(); showToast('هذا الشهر مسجّل كإعفاء بالفعل'); return; }
+    rec.due=due;
+    SETTINGS.receiptSeq=(Number(SETTINGS.receiptSeq)||0)+1;
+    rec.entries.push({id:uid('p'),amount:remaining,date:todayKey(),note:'دفع سريع من اختصار الكيبورد',no:SETTINGS.receiptSeq});
+    syncPayRecord(s,ym);
+    closeQuickPayment();
+    await saveData();
+    paymentRefreshAfterShortcut(s);
+    showToast(`تم تسجيل دفع ${ymLabel(ym)} للطالب ${s.name} بنجاح ✔`);
+  };
+}
+function openQuickPaymentMenu(){
+  const s=activeStudentForPayment(); if(!s) return;
+  if(document.querySelector('.overlay')){ showToast('اقفل النافذة المفتوحة الأول'); return; }
+  const current=paymentYmOffset(0), previous=paymentYmOffset(-1);
+  const g=getGroup(s.groupId);
+  const ov=document.createElement('div'); ov.className='overlay quick-payment-overlay';
+  const year=Number(current.slice(0,4));
+  const monthOptions=Array.from({length:24},(_,i)=>ymAdd(current,-i));
+  ov.innerHTML=`
+    <div class="modal quick-payment-modal" role="dialog" aria-modal="true">
+      <div class="modal-head"><h3>💳 Quick Payment</h3><button class="close" id="quickMenuClose">×</button></div>
+      <div class="quick-pay-student"><b>${escapeHtml(s.name)}</b><span>${escapeHtml(g?.name||'بدون مجموعة')}</span></div>
+      <div class="quick-pay-menu">
+        <button class="btn gold" id="quickCurrent">دفع الشهر الحالي <kbd>F2</kbd><small>${ymLabel(current)}</small></button>
+        <button class="btn outline" id="quickPrevious">دفع شهر سابق <small>${ymLabel(previous)}</small></button>
+      </div>
+      <div class="field"><label for="quickMonthSelect">اختيار شهر معين</label>
+        <select id="quickMonthSelect">${monthOptions.map(m=>`<option value="${m}">${ymLabel(m)}</option>`).join('')}</select>
+      </div>
+      <div class="modal-actions">
+        <button class="btn outline" id="quickHistory">سجل المدفوعات <kbd>F4</kbd></button>
+        <button class="btn outline" id="quickMenuCancel">إغلاق <kbd>Esc</kbd></button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov); QUICK_PAYMENT_OVERLAY=ov;
+  const close=()=>closeQuickPayment();
+  ov.querySelector('#quickMenuClose').onclick=close;
+  ov.querySelector('#quickMenuCancel').onclick=close;
+  ov.addEventListener('click',e=>{if(e.target===ov) close();});
+  ov.querySelector('#quickCurrent').onclick=()=>{close();showQuickPaymentConfirm(s,current);};
+  ov.querySelector('#quickPrevious').onclick=()=>{close();showQuickPaymentConfirm(s,previous);};
+  ov.querySelector('#quickMonthSelect').onchange=e=>{
+    const ym=e.target.value; close(); showQuickPaymentConfirm(s,ym);
+  };
+  ov.querySelector('#quickHistory').onclick=()=>{close();openStudentPaymentHistory(s);};
+}
+function openStudentPaymentHistory(s){
+  if(QUICK_PAYMENT_OVERLAY) closeQuickPayment();
+  const months=Object.keys(s.payments||{}).sort((a,b)=>b.localeCompare(a));
+  const ov=document.createElement('div'); ov.className='overlay quick-payment-overlay';
+  ov.innerHTML=`
+    <div class="modal quick-payment-modal" role="dialog" aria-modal="true">
+      <div class="modal-head"><h3>📚 سجل مدفوعات ${escapeHtml(s.name)}</h3><button class="close" id="historyClose">×</button></div>
+      <div class="quick-pay-student"><b>${escapeHtml(s.name)}</b><span>${escapeHtml(getGroup(s.groupId)?.name||'بدون مجموعة')}</span></div>
+      <div class="quick-history-list">
+        ${months.length?months.map(ym=>{
+          const i=payInfo(s,ym);
+          const entries=i.entries.map(e=>`<div class="quick-history-entry"><span>${Number(e.amount||0).toLocaleString('ar-EG')} ج.م</span><small>${escapeHtml(e.date||'—')}</small></div>`).join('');
+          return `<div class="quick-history-month"><div class="quick-history-head"><b>${escapeHtml(ymLabel(ym))}</b>${payStatusPill(i)}</div><div class="quick-history-meta">المطلوب: ${i.due.toLocaleString('ar-EG')} · المدفوع: ${i.received.toLocaleString('ar-EG')}</div>${entries||'<small>لا توجد دفعات مسجلة</small>'}<button class="btn outline small" data-month="${ym}">فتح تفاصيل الشهر</button></div>`;
+        }).join(''):'<div class="empty">لا يوجد سجل مدفوعات لهذا الطالب.</div>'}
+      </div>
+      <div class="modal-actions"><button class="btn outline" id="historyCancel">إغلاق <kbd>Esc</kbd></button></div>
+    </div>`;
+  document.body.appendChild(ov); QUICK_PAYMENT_OVERLAY=ov;
+  const close=()=>closeQuickPayment();
+  ov.querySelector('#historyClose').onclick=close;
+  ov.querySelector('#historyCancel').onclick=close;
+  ov.addEventListener('click',e=>{if(e.target===ov) close();});
+  ov.querySelectorAll('[data-month]').forEach(btn=>btn.onclick=()=>{
+    const ym=btn.dataset.month; close(); openPaymentModal(s,ym,()=>paymentRefreshAfterShortcut(s));
+  });
+}
+function installPaymentKeyboardShortcuts(){
+  if(window.__paymentShortcutsInstalled) return;
+  window.__paymentShortcutsInstalled=true;
+  document.addEventListener('keydown',e=>{
+    if(e.isComposing || e.ctrlKey || e.altKey || e.metaKey) return;
+    if(e.key==='Escape'){
+      if(QUICK_PAYMENT_OVERLAY){e.preventDefault();e.stopPropagation();closeQuickPayment();}
+      else { const paymentOverlay=document.querySelector('.overlay.payment-record-overlay'); if(paymentOverlay){e.preventDefault();e.stopPropagation();paymentOverlay.remove();} }
+      return;
+    }
+    if(e.key==='Enter' && QUICK_PAYMENT_OVERLAY?.querySelector('#quickPayConfirm')){
+      e.preventDefault();e.stopPropagation();
+      if(!QUICK_PAYMENT_BUSY) QUICK_PAYMENT_OVERLAY.querySelector('#quickPayConfirm').click();
+      return;
+    }
+    if(!['F2','F3','F4'].includes(e.key) || e.repeat) return;
+    // لا نسرق الاختصارات من نوافذ النظام الأخرى؛ لكنها تعمل حتى لو التركيز داخل input أو search.
+    if(document.querySelector('.overlay')) return;
+    e.preventDefault();e.stopPropagation();
+    if(e.key==='F2'){
+      const s=activeStudentForPayment(); if(s) showQuickPaymentConfirm(s,paymentYmOffset(0));
+    }else if(e.key==='F3') openQuickPaymentMenu();
+    else if(e.key==='F4'){
+      const s=activeStudentForPayment(); if(s) openStudentPaymentHistory(s);
+    }
+  },true);
+}
+installPaymentKeyboardShortcuts();
+
 document.getElementById('loginBtn').onclick = async ()=>{
   authErr('');
   const email = document.getElementById('authEmail').value.trim();
